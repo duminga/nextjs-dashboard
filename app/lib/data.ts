@@ -48,7 +48,7 @@ export async function fetchLatestInvoices() {
       },
     });
 
-    const latestInvoices = data.map((invoice) => ({
+    const latestInvoices = data.map((invoice: typeof data[0]) => ({
       id: invoice.id,
       amount: formatCurrency(invoice.amount),
       name: invoice.customer.name,
@@ -178,7 +178,7 @@ export async function fetchFilteredInvoices(
       },
     });
 
-    const result: InvoicesTable[] = invoices.map((invoice) => ({
+    const result: InvoicesTable[] = invoices.map((invoice: typeof invoices[0]) => ({
       id: invoice.id,
       customer_id: invoice.customer_id,
       amount: invoice.amount,
@@ -329,7 +329,7 @@ export async function fetchFilteredCustomers(query: string) {
       },
     });
 
-    const result: CustomersTableType[] = customers.map((customer) => {
+    const result: CustomersTableType[] = customers.map((customer: typeof customers[0]) => {
       const totalInvoices = customer.invoices.length;
       const totalPending = customer.invoices
         .filter((inv) => inv.status === 'pending')

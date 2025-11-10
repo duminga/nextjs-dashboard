@@ -332,11 +332,11 @@ export async function fetchFilteredCustomers(query: string) {
     const result: CustomersTableType[] = customers.map((customer: typeof customers[0]) => {
       const totalInvoices = customer.invoices.length;
       const totalPending = customer.invoices
-        .filter((inv) => inv.status === 'pending')
-        .reduce((sum, inv) => sum + inv.amount, 0);
+        .filter((inv: typeof customer.invoices[0]) => inv.status === 'pending')
+        .reduce((sum: number, inv: typeof customer.invoices[0]) => sum + inv.amount, 0);
       const totalPaid = customer.invoices
-        .filter((inv) => inv.status === 'paid')
-        .reduce((sum, inv) => sum + inv.amount, 0);
+        .filter((inv: typeof customer.invoices[0]) => inv.status === 'paid')
+        .reduce((sum: number, inv: typeof customer.invoices[0]) => sum + inv.amount, 0);
 
       return {
         id: customer.id,

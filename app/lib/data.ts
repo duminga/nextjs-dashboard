@@ -1,4 +1,4 @@
-import postgres from 'postgres';
+import { prismaclinet } from './db/prisma';
 import {
   CustomerField,
   CustomersTableType,
@@ -9,8 +9,6 @@ import {
 } from './definitions';
 import { formatCurrency } from './utils';
 
-const sql = postgres(process.env.POSTGRES_URL!);
-
 export async function fetchRevenue() {
   try {
     // 为了演示目的，人为延迟响应。
@@ -19,11 +17,11 @@ export async function fetchRevenue() {
     // console.log('正在获取收入数据...');
     // await new Promise((resolve) => setTimeout(resolve, 3000));
 
-    const data = await sql<Revenue[]>`SELECT * FROM revenue`;
+    const data = await prismaclinet.revenue.findMany();
 
     // console.log('数据获取在 3 秒后完成。');
 
-    return data;
+    return data as Revenue[];
   } catch (error) {
     console.error('Database Error:', error);
     throw new Error('Failed to fetch revenue data.');
@@ -32,16 +30,30 @@ export async function fetchRevenue() {
 
 export async function fetchLatestInvoices() {
   try {
-    const data = await sql<LatestInvoiceRaw[]>`
-      SELECT invoices.amount, customers.name, customers.image_url, customers.email, invoices.id
-      FROM invoices
-      JOIN customers ON invoices.customer_id = customers.id
-      ORDER BY invoices.date DESC
-      LIMIT 5`;
+    const data = await prismaclinet.invoices.findMany({
+      take: 5,
+      orderBy: {
+        date: 'desc',
+      },
+      select: {
+        id: true,
+        amount: true,
+        customer: {
+          select: {
+            name: true,
+            image_url: true,
+            email: true,
+          },
+        },
+      },
+    });
 
     const latestInvoices = data.map((invoice) => ({
-      ...invoice,
+      id: invoice.id,
       amount: formatCurrency(invoice.amount),
+      name: invoice.customer.name,
+      image_url: invoice.customer.image_url,
+      email: invoice.customer.email,
     }));
     return latestInvoices;
   } catch (error) {
@@ -52,26 +64,46 @@ export async function fetchLatestInvoices() {
 
 export async function fetchCardData() {
   try {
-    // 您可能可以将这些查询合并为单个 SQL 查询
-    // 但是，我们故意将它们分开，以演示
-    // 如何使用 JS 并行初始化多个查询。
-    const invoiceCountPromise = sql`SELECT COUNT(*) FROM invoices`;
-    const customerCountPromise = sql`SELECT COUNT(*) FROM customers`;
-    const invoiceStatusPromise = sql`SELECT
-         SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END) AS "paid",
-         SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END) AS "pending"
-         FROM invoices`;
-
-    const data = await Promise.all([
-      invoiceCountPromise,
-      customerCountPromise,
-      invoiceStatusPromise,
+    // 并行执行多个查询
+    const [invoiceCount, customerCount, invoiceStatus] = await Promise.all([
+      prismaclinet.invoices.count(),
+      prismaclinet.customers.count(),
+      prismaclinet.invoices.aggregate({
+        _sum: {
+          amount: true,
+        },
+        where: {
+          OR: [
+            { status: 'paid' },
+            { status: 'pending' },
+          ],
+        },
+      }),
     ]);
 
-    const numberOfInvoices = Number(data[0][0].count ?? '0');
-    const numberOfCustomers = Number(data[1][0].count ?? '0');
-    const totalPaidInvoices = formatCurrency(data[2][0].paid ?? '0');
-    const totalPendingInvoices = formatCurrency(data[2][0].pending ?? '0');
+    // 分别计算 paid 和 pending 的总额
+    const paidInvoices = await prismaclinet.invoices.aggregate({
+      _sum: {
+        amount: true,
+      },
+      where: {
+        status: 'paid',
+      },
+    });
+
+    const pendingInvoices = await prismaclinet.invoices.aggregate({
+      _sum: {
+        amount: true,
+      },
+      where: {
+        status: 'pending',
+      },
+    });
+
+    const numberOfInvoices = invoiceCount;
+    const numberOfCustomers = customerCount;
+    const totalPaidInvoices = formatCurrency(paidInvoices._sum.amount ?? 0);
+    const totalPendingInvoices = formatCurrency(pendingInvoices._sum.amount ?? 0);
 
     return {
       numberOfCustomers,
@@ -93,28 +125,71 @@ export async function fetchFilteredInvoices(
   const offset = (currentPage - 1) * ITEMS_PER_PAGE;
 
   try {
-    const invoices = await sql<InvoicesTable[]>`
-      SELECT
-        invoices.id,
-        invoices.amount,
-        invoices.date,
-        invoices.status,
-        customers.name,
-        customers.email,
-        customers.image_url
-      FROM invoices
-      JOIN customers ON invoices.customer_id = customers.id
-      WHERE
-        customers.name ILIKE ${`%${query}%`} OR
-        customers.email ILIKE ${`%${query}%`} OR
-        invoices.amount::text ILIKE ${`%${query}%`} OR
-        invoices.date::text ILIKE ${`%${query}%`} OR
-        invoices.status ILIKE ${`%${query}%`}
-      ORDER BY invoices.date DESC
-      LIMIT ${ITEMS_PER_PAGE} OFFSET ${offset}
-    `;
+    const invoices = await prismaclinet.invoices.findMany({
+      skip: offset,
+      take: ITEMS_PER_PAGE,
+      where: {
+        OR: [
+          {
+            customer: {
+              name: {
+                contains: query,
+                mode: 'insensitive',
+              },
+            },
+          },
+          {
+            customer: {
+              email: {
+                contains: query,
+                mode: 'insensitive',
+              },
+            },
+          },
+          {
+            amount: {
+              equals: isNaN(Number(query)) ? undefined : Number(query),
+            },
+          },
+          {
+            status: {
+              contains: query,
+              mode: 'insensitive',
+            },
+          },
+        ],
+      },
+      orderBy: {
+        date: 'desc',
+      },
+      select: {
+        id: true,
+        customer_id: true,
+        amount: true,
+        date: true,
+        status: true,
+        customer: {
+          select: {
+            name: true,
+            email: true,
+            image_url: true,
+          },
+        },
+      },
+    });
 
-    return invoices;
+    const result: InvoicesTable[] = invoices.map((invoice) => ({
+      id: invoice.id,
+      customer_id: invoice.customer_id,
+      amount: invoice.amount,
+      date: invoice.date.toISOString(),
+      status: invoice.status as 'pending' | 'paid',
+      name: invoice.customer.name,
+      email: invoice.customer.email,
+      image_url: invoice.customer.image_url,
+    }));
+
+    return result;
   } catch (error) {
     console.error('Database Error:', error);
     throw new Error('Failed to fetch invoices.');
@@ -123,18 +198,41 @@ export async function fetchFilteredInvoices(
 
 export async function fetchInvoicesPages(query: string) {
   try {
-    const data = await sql`SELECT COUNT(*)
-    FROM invoices
-    JOIN customers ON invoices.customer_id = customers.id
-    WHERE
-      customers.name ILIKE ${`%${query}%`} OR
-      customers.email ILIKE ${`%${query}%`} OR
-      invoices.amount::text ILIKE ${`%${query}%`} OR
-      invoices.date::text ILIKE ${`%${query}%`} OR
-      invoices.status ILIKE ${`%${query}%`}
-  `;
+    const count = await prismaclinet.invoices.count({
+      where: {
+        OR: [
+          {
+            customer: {
+              name: {
+                contains: query,
+                mode: 'insensitive',
+              },
+            },
+          },
+          {
+            customer: {
+              email: {
+                contains: query,
+                mode: 'insensitive',
+              },
+            },
+          },
+          {
+            amount: {
+              equals: isNaN(Number(query)) ? undefined : Number(query),
+            },
+          },
+          {
+            status: {
+              contains: query,
+              mode: 'insensitive',
+            },
+          },
+        ],
+      },
+    });
 
-    const totalPages = Math.ceil(Number(data[0].count) / ITEMS_PER_PAGE);
+    const totalPages = Math.ceil(count / ITEMS_PER_PAGE);
     return totalPages;
   } catch (error) {
     console.error('Database Error:', error);
@@ -144,23 +242,31 @@ export async function fetchInvoicesPages(query: string) {
 
 export async function fetchInvoiceById(id: string) {
   try {
-    const data = await sql<InvoiceForm[]>`
-      SELECT
-        invoices.id,
-        invoices.customer_id,
-        invoices.amount,
-        invoices.status
-      FROM invoices
-      WHERE invoices.id = ${id};
-    `;
+    const invoice = await prismaclinet.invoices.findUnique({
+      where: {
+        id: id,
+      },
+      select: {
+        id: true,
+        customer_id: true,
+        amount: true,
+        status: true,
+      },
+    });
 
-    const invoice = data.map((invoice) => ({
-      ...invoice,
+    if (!invoice) {
+      throw new Error('Invoice not found');
+    }
+
+    const result: InvoiceForm = {
+      id: invoice.id,
+      customer_id: invoice.customer_id,
+      status: invoice.status as 'pending' | 'paid',
       // 将金额从美分转换为美元
       amount: invoice.amount / 100,
-    }));
+    };
 
-    return invoice[0];
+    return result;
   } catch (error) {
     console.error('Database Error:', error);
     throw new Error('Failed to fetch invoice.');
@@ -169,15 +275,17 @@ export async function fetchInvoiceById(id: string) {
 
 export async function fetchCustomers() {
   try {
-    const customers = await sql<CustomerField[]>`
-      SELECT
-        id,
-        name
-      FROM customers
-      ORDER BY name ASC
-    `;
+    const customers = await prismaclinet.customers.findMany({
+      select: {
+        id: true,
+        name: true,
+      },
+      orderBy: {
+        name: 'asc',
+      },
+    });
 
-    return customers;
+    return customers as CustomerField[];
   } catch (err) {
     console.error('Database Error:', err);
     throw new Error('Failed to fetch all customers.');
@@ -186,31 +294,62 @@ export async function fetchCustomers() {
 
 export async function fetchFilteredCustomers(query: string) {
   try {
-    const data = await sql<CustomersTableType[]>`
-		SELECT
-		  customers.id,
-		  customers.name,
-		  customers.email,
-		  customers.image_url,
-		  COUNT(invoices.id) AS total_invoices,
-		  SUM(CASE WHEN invoices.status = 'pending' THEN invoices.amount ELSE 0 END) AS total_pending,
-		  SUM(CASE WHEN invoices.status = 'paid' THEN invoices.amount ELSE 0 END) AS total_paid
-		FROM customers
-		LEFT JOIN invoices ON customers.id = invoices.customer_id
-		WHERE
-		  customers.name ILIKE ${`%${query}%`} OR
-        customers.email ILIKE ${`%${query}%`}
-		GROUP BY customers.id, customers.name, customers.email, customers.image_url
-		ORDER BY customers.name ASC
-	  `;
+    const customers = await prismaclinet.customers.findMany({
+      where: {
+        OR: [
+          {
+            name: {
+              contains: query,
+              mode: 'insensitive',
+            },
+          },
+          {
+            email: {
+              contains: query,
+              mode: 'insensitive',
+            },
+          },
+        ],
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        image_url: true,
+        invoices: {
+          select: {
+            id: true,
+            amount: true,
+            status: true,
+          },
+        },
+      },
+      orderBy: {
+        name: 'asc',
+      },
+    });
 
-    const customers = data.map((customer) => ({
-      ...customer,
-      total_pending: formatCurrency(customer.total_pending),
-      total_paid: formatCurrency(customer.total_paid),
-    }));
+    const result: CustomersTableType[] = customers.map((customer) => {
+      const totalInvoices = customer.invoices.length;
+      const totalPending = customer.invoices
+        .filter((inv) => inv.status === 'pending')
+        .reduce((sum, inv) => sum + inv.amount, 0);
+      const totalPaid = customer.invoices
+        .filter((inv) => inv.status === 'paid')
+        .reduce((sum, inv) => sum + inv.amount, 0);
 
-    return customers;
+      return {
+        id: customer.id,
+        name: customer.name,
+        email: customer.email,
+        image_url: customer.image_url,
+        total_invoices: totalInvoices,
+        total_pending: totalPending,
+        total_paid: totalPaid,
+      };
+    });
+
+    return result;
   } catch (err) {
     console.error('Database Error:', err);
     throw new Error('Failed to fetch customer table.');

@@ -1,16 +1,26 @@
-import postgres from 'postgres';
-
-const sql = postgres(process.env.POSTGRES_URL!);
+import {prismaclinet} from '@/app/lib/db/prisma';
 
 async function listInvoices() {
-  const data = await sql`
-    SELECT invoices.amount, customers.name
-    FROM invoices
-    JOIN customers ON invoices.customer_id = customers.id
-    WHERE invoices.amount = 666;
-  `;
+  // 使用 Prisma 的关系查询，一次性获取发票和客户信息
+  const data = await prismaclinet.invoices.findMany({
+    where: {
+      amount: 666,
+    },
+    select: {
+      amount: true,
+      customer: {
+        select: {
+          name: true,
+        },
+      },
+    },
+  });
 
-  return data;
+  // 转换数据格式
+  return data.map((invoice) => ({
+    amount: invoice.amount,
+    name: invoice.customer.name,
+  }));
 }
 
 export async function GET() {
